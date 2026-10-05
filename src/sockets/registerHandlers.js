@@ -18,8 +18,8 @@ export function registerHandlers(io, manager) {
         if (can(p.role, 'approve')) io.to(p.id).emit('requests_updated', { requests: room.pendingRequests() });
     };
 
-    const enter = (room, username, ack) => {
-      const me = room.addParticipant(socket.id, username.trim().slice(0, 24) || 'Guest');
+    const enter = (room, username, clientId, ack) => {
+      const me = room.addParticipant(socket.id, username.trim().slice(0, 24) || 'Guest', clientId);
       socket.join(room.code);
       socket.data.roomId = room.code;
       ack?.({ ok: true, roomId: room.code, me: me.toJSON(), participants: room.list() });
@@ -28,12 +28,12 @@ export function registerHandlers(io, manager) {
       pushRequests(room);
     };
 
-    socket.on('create_room', ({ username } = {}, ack) => enter(manager.create(), username || '', ack));
+    socket.on('create_room', ({ username, clientId } = {}, ack) => enter(manager.create(), username || '', clientId, ack));
 
-    socket.on('join_room', ({ roomId, username } = {}, ack) => {
+    socket.on('join_room', ({ roomId, username, clientId } = {}, ack) => {
       const room = manager.get(roomId);
       if (!room) return ack?.({ ok: false, error: 'Room not found. Check the code.' });
-      enter(room, username || '', ack);
+      enter(room, username || '', clientId, ack);
     });
 
     const leave = () => {
@@ -48,7 +48,27 @@ export function registerHandlers(io, manager) {
       manager.deleteIfEmpty(room);
     };
     socket.on('leave_room', leave);
-    socket.on('disconnect', leave);
+
+    // On a dropped connection (refresh, network blip) keep the user for 20s so they can rejoin.
+    socket.on('disconnect', () => {
+      const c = ctx(); if (!c) return;
+      c.me.graceTimer = setTimeout(leave, 20000);
+    });
+
+    socket.on('rejoin_room', ({ roomId, clientId } = {}, ack) => {
+      const room = manager.get(roomId);
+      const p = room?.findByClientId(clientId);
+      if (!p) return ack?.({ ok: false });
+      clearTimeout(p.graceTimer);
+      p.graceTimer = null;
+      room.rebind(p, socket.id);
+      socket.join(room.code);
+      socket.data.roomId = room.code;
+      ack?.({ ok: true, roomId: room.code, me: p.toJSON(), participants: room.list() });
+      socket.emit('sync_state', room.snapshot());
+      io.to(room.code).emit('participants_updated', { participants: room.list() });
+      pushRequests(room);
+    });
 
     // ---- playback (Host / Moderator only) ----
     for (const type of ['play', 'pause', 'seek', 'change_video']) {

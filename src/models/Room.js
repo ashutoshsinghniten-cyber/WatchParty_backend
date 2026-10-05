@@ -16,16 +16,30 @@ export class Room {
   list() { return [...this.participants.values()].map((p) => p.toJSON()); }
   get(id) { return this.participants.get(id); }
 
-  addParticipant(id, username) {
+  addParticipant(id, username, clientId) {
     const role = this.isEmpty ? ROLES.HOST : ROLES.PARTICIPANT;
-    const p = new Participant(id, username, role);
+    const p = new Participant(id, username, role, clientId);
     this.participants.set(id, p);
     return p;
+  }
+
+  findByClientId(clientId) {
+    return [...this.participants.values()].find((p) => p.clientId && p.clientId === clientId);
+  }
+
+  /** Give an existing participant a new socket id (used when they refresh and reconnect). */
+  rebind(p, newId) {
+    const oldId = p.id;
+    this.participants.delete(oldId);
+    for (const r of this.requests.values()) if (r.userId === oldId) r.userId = newId;
+    p.id = newId;
+    this.participants.set(newId, p);
   }
 
   /** Removes a user. If the host leaves, promotes a moderator (or oldest user). Returns new host or null. */
   removeParticipant(id) {
     const leaving = this.participants.get(id);
+    clearTimeout(leaving?.graceTimer);
     this.participants.delete(id);
     for (const [rid, r] of this.requests) if (r.userId === id) this.requests.delete(rid);
     if (leaving?.role === ROLES.HOST && !this.isEmpty) {
